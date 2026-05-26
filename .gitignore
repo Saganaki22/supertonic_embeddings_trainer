@@ -4,14 +4,17 @@ __pycache__/
 *.onnx
 pipeline/onnx_v2/
 pipeline/onnx_v3/
+pipeline/onnx/
 pipeline/logs/
 pipeline/voices/
 pipeline/samples/
 pipeline/supertonic3/.cache/
 pipeline/supertonic3/audio_samples/
+pipeline/supertonic2/
 pipeline/pretrained/
 pipeline/hf_cache/
 output/
+reference_styles/
 *.wav
 *.mp3
 *.pt
