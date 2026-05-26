@@ -1,50 +1,65 @@
-import os
-import numpy as np
 import torch
 import torch.nn as nn
-import soundfile as sf
+import torch.nn.functional as F
 import torchaudio
-from transformers import WavLMModel
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-
-def load_audio_16khz_mono(file_path):
-    wav, sr = sf.read(file_path, dtype="float32")
-    if wav.ndim > 1:
-        wav = np.mean(wav, axis=1)
-    wav = torch.from_numpy(wav).unsqueeze(0).float()
-    if sr != 16000:
-        wav = torchaudio.functional.resample(wav, sr, 16000)
-    return wav
+WAVLM_LAYER = 3
 
 
-class WavLMLoss(nn.Module):
-    def __init__(self, target_wav_path: str):
-        super().__init__()
-        print("  Loading WavLM-Large for perceptual loss...")
-        self.model = WavLMModel.from_pretrained("microsoft/wavlm-large")
-        self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad_(False)
-        self.model.to(DEVICE)
+def load_wavlm(device):
+    from transformers import WavLMModel
+    model = WavLMModel.from_pretrained("microsoft/wavlm-large")
+    model = model.to(device).eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
 
-        target_wav = load_audio_16khz_mono(target_wav_path).to(DEVICE)
-        with torch.no_grad():
-            out = self.model(target_wav, output_hidden_states=True)
-            layer3 = out.hidden_states[3]
-        self.target_mean = layer3.mean(dim=1).detach()
-        self.target_std = layer3.std(dim=1).detach()
-        print(f"  Target audio: {target_wav_path} | {target_wav.shape[-1]/16000:.2f}s")
 
-    def forward(self, generated_wav):
-        gen_16k = torchaudio.functional.resample(generated_wav, 44100, 16000)
-        out = self.model(gen_16k, output_hidden_states=True)
-        layer3 = out.hidden_states[3]
-        gen_mean = layer3.mean(dim=1)
-        gen_std = layer3.std(dim=1)
-        loss = (
-            nn.functional.mse_loss(gen_mean, self.target_mean)
-            + nn.functional.mse_loss(gen_std, self.target_std)
-        )
-        return loss
+def extract_wavlm_targets(wavlm, wav_tensor, device, sr=44100):
+    wav_16k = torchaudio.functional.resample(
+        wav_tensor.unsqueeze(0).to(device), sr, 16000
+    )
+    with torch.no_grad():
+        out = wavlm(wav_16k, output_hidden_states=True)
+    feat = out.hidden_states[WAVLM_LAYER]
+    return feat.mean(dim=1).detach(), feat.std(dim=1).detach()
+
+
+def wavlm_loss(wavlm, gen_wav, target_features, device, sr=44100):
+    wav_16k = torchaudio.functional.resample(gen_wav.unsqueeze(0), sr, 16000)
+    out = wavlm(wav_16k, output_hidden_states=True)
+    feat = out.hidden_states[WAVLM_LAYER]
+    tgt_mean, tgt_std = target_features
+    return (
+        F.mse_loss(feat.mean(dim=1), tgt_mean)
+        + F.mse_loss(feat.std(dim=1), tgt_std)
+    )
+
+
+def load_ecapa(device):
+    from speechbrain.inference.speaker import EncoderClassifier
+    model = EncoderClassifier.from_hdf5(
+        source="speechbrain/spkrec-ecapa-voxceleb",
+        savedir="pipeline/pretrained/ecapa",
+        run_opts={"device": str(device)},
+    )
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
+
+
+def extract_ecapa_targets(ecapa, wav_tensor, device, sr=44100):
+    wav_16k = torchaudio.functional.resample(wav_tensor, sr, 16000)
+    with torch.no_grad():
+        emb = ecapa.encode_batch(wav_16k.unsqueeze(0).cpu())
+    return emb.squeeze().to(device).detach()
+
+
+def ecapa_loss(ecapa, gen_wav, target_emb, device, sr=44100):
+    wav_16k = torchaudio.functional.resample(gen_wav, sr, 16000)
+    with torch.no_grad():
+        gen_emb = ecapa.encode_batch(wav_16k.unsqueeze(0).detach().cpu())
+    gen_emb = gen_emb.squeeze().to(device)
+    sim = F.cosine_similarity(gen_emb.unsqueeze(0), target_emb.unsqueeze(0))
+    return 1.0 - sim

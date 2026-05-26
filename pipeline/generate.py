@@ -15,7 +15,7 @@ os.makedirs(SAMPLES_DIR, exist_ok=True)
 
 def generate(text, style_path, lang="en", total_step=6, speed=1.05, onnx_dir=None):
     if onnx_dir is None:
-        onnx_dir = os.path.join(os.path.dirname(__file__), "onnx")
+        onnx_dir = os.path.join(os.path.dirname(__file__), "onnx_v2")
     tts = load_text_to_speech(onnx_dir)
     voice = load_voice_style([style_path], verbose=True)
     name = os.path.basename(style_path).replace(".json", "")

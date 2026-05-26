@@ -1,18 +1,3 @@
-"""
-Train a voice style JSON from a WAV file for Supertonic TTS.
-
-Approach: gradient-based inverse optimization.
-  1. Convert ONNX TTS models to PyTorch (enables backprop)
-  2. Initialize style_ttl from the closest reference voice
-  3. Optimize style_ttl to maximize speaker similarity (SpeechBrain ECAPA)
-  4. style_dp is frozen (copied from reference)
-
-Usage:
-    python train_style.py --wav voices/my_voice.wav --name my_voice --gender F
-    python train_style.py --wav voices/my_voice.wav --name my_voice --reference_style auto
-    python train_style.py --config configs/custom.py
-"""
-
 import os
 import sys
 import glob
@@ -24,8 +9,6 @@ import torch
 from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).parent
-ONNX_DIR = str(PIPELINE_DIR / "onnx")
-VOICE_STYLES_DIR = str(PIPELINE_DIR.parent / "reference_styles")
 LOGS_DIR = str(PIPELINE_DIR / "logs")
 
 sys.path.insert(0, str(PIPELINE_DIR))
@@ -44,24 +27,27 @@ def load_single_voice_style(path):
     )
 
 
-def find_closest_style(wavlm_loss, target_wav_44k, dp_model, te_model, ve_model, voc_model,
-                       text_ids, text_mask, noisy_latent, latent_mask, vocoder_steps, speed):
-    all_styles = sorted(glob.glob(os.path.join(VOICE_STYLES_DIR, "[FM]*.json")))
+def find_closest_style(styles_dir, model, target_wav_path,
+                       text_ids, text_mask, noisy_latent, latent_mask,
+                       vocoder_steps, speed):
+    from pipeline.utils.loss import load_wavlm, extract_wavlm_targets, wavlm_loss
+
+    wavlm = load_wavlm(DEVICE)
+    import soundfile as sf
+    target_np, _ = sf.read(target_wav_path, dtype="float32")
+    target_t = torch.tensor(target_np, dtype=torch.float32).to(DEVICE)
+    target_feats = extract_wavlm_targets(wavlm, target_t, DEVICE)
+
+    all_styles = sorted(glob.glob(os.path.join(styles_dir, "[FM]*.json")))
     if not all_styles:
         return None, None
     best_dist = float("inf")
     best_path = None
     for sp in all_styles:
-        s_ttl, s_dp = load_single_voice_style(sp)
+        s_ttl, _ = load_single_voice_style(sp)
         with torch.no_grad():
-            text_emb = te_model(text_ids, s_ttl, text_mask)
-            xt = noisy_latent * latent_mask
-            total_step_t = torch.tensor([vocoder_steps], dtype=torch.float32).to(DEVICE)
-            for step in range(vocoder_steps):
-                current_step_t = torch.tensor([step], dtype=torch.float32).to(DEVICE)
-                xt = ve_model(xt, text_emb, s_ttl, latent_mask, text_mask, current_step_t, total_step_t)
-            wav = voc_model(xt)
-            dist = wavlm_loss(wav).item()
+            wav = model(text_ids, text_mask, s_ttl, vocoder_steps, noisy_latent, latent_mask)
+            dist = wavlm_loss(wavlm, wav.squeeze(), target_feats, DEVICE).item()
         print(f"    {os.path.basename(sp)}: {dist:.4f}")
         if dist < best_dist:
             best_dist = dist
@@ -84,6 +70,9 @@ def train(args, on_step=None):
     save_steps = args.save_steps if args.save_steps is not None else config.SAVE_STEPS
     threshold = args.threshold if args.threshold is not None else config.EARLY_STOP_LOSS_THRESHOLD
 
+    onnx_dir = args.onnx_dir if hasattr(args, "onnx_dir") and args.onnx_dir else str(PIPELINE_DIR / "onnx_v2")
+    styles_dir = args.styles_dir if hasattr(args, "styles_dir") and args.styles_dir else str(PIPELINE_DIR.parent / "reference_styles_v2")
+
     print(f"Name: {name}  Gender: {gender}  Device: {DEVICE}")
     print(f"Target WAV: {wav_path}")
 
@@ -93,46 +82,45 @@ def train(args, on_step=None):
     log_dir = os.path.join(LOGS_DIR, name)
     os.makedirs(log_dir, exist_ok=True)
 
-    tts = load_text_to_speech(ONNX_DIR)
+    tts = load_text_to_speech(onnx_dir)
     dataloader = get_train_dataloader(tts, texts)
     del tts
     data_iter = iter(dataloader)
 
     tmp_ids, tmp_mask = next(data_iter)
 
-    model = SupertonicModel(ONNX_DIR, wav_path)
+    model = SupertonicModel(onnx_dir)
 
     if ref_style == "auto":
         print("\nFinding closest reference style (WavLM Layer 3)...")
-        dummy_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))[1]
+        dummy_dp = load_single_voice_style(os.path.join(styles_dir, "M1.json"))[1]
         with torch.no_grad():
             init_dur_tmp = model.dp_model(tmp_ids, dummy_dp, tmp_mask) / speed
             init_dur_tmp = init_dur_tmp.detach().cpu().numpy()
-        tts_tmp = load_text_to_speech(ONNX_DIR)
+        tts_tmp = load_text_to_speech(onnx_dir)
         noisy_tmp, lmask_tmp = tts_tmp.sample_noisy_latent(duration=init_dur_tmp)
         noisy_tmp = torch.tensor(noisy_tmp, dtype=torch.float32).to(DEVICE)
         lmask_tmp = torch.tensor(lmask_tmp, dtype=torch.float32).to(DEVICE)
         del tts_tmp
 
         style_ttl, style_dp = find_closest_style(
-            model.voice_encoder, wav_path,
-            model.dp_model, model.te_model, model.ve_model, model.voc_model,
+            styles_dir, model, wav_path,
             tmp_ids, tmp_mask, noisy_tmp, lmask_tmp, vocoder_steps, speed
         )
         del noisy_tmp, lmask_tmp
         if style_ttl is None:
             print("  No reference styles found, using random init")
-            _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))
+            _, style_dp = load_single_voice_style(os.path.join(styles_dir, "M1.json"))
             style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
     elif ref_style and os.path.exists(ref_style):
         print(f"\nLoading reference: {ref_style}")
         style_ttl, style_dp = load_single_voice_style(ref_style)
     else:
         print("\nRandom init (not recommended)")
-        _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))
+        _, style_dp = load_single_voice_style(os.path.join(styles_dir, "M1.json"))
         style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
 
-    tts = load_text_to_speech(ONNX_DIR)
+    tts = load_text_to_speech(onnx_dir)
     with torch.no_grad():
         init_dur = model.dp_model(tmp_ids, style_dp, tmp_mask) / speed
         init_dur = init_dur.detach().cpu().numpy()
@@ -153,6 +141,13 @@ def train(args, on_step=None):
     best_dp = style_dp.detach().clone()
     start_time = time.time()
 
+    from pipeline.utils.loss import load_wavlm, extract_wavlm_targets, wavlm_loss
+    wavlm = load_wavlm(DEVICE)
+    import soundfile as sf
+    target_np, _ = sf.read(wav_path, dtype="float32")
+    target_t = torch.tensor(target_np, dtype=torch.float32).to(DEVICE)
+    target_feats = extract_wavlm_targets(wavlm, target_t, DEVICE)
+
     print(f"\nOptimizing ({num_steps} steps, early stop at {threshold})...")
     for step in range(num_steps):
         try:
@@ -165,7 +160,8 @@ def train(args, on_step=None):
         text_mask = text_mask.to(DEVICE)
 
         optimizer.zero_grad()
-        _, loss = model(text_ids, text_mask, style_ttl, vocoder_steps, noisy_fixed, lmask)
+        wav_out = model(text_ids, text_mask, style_ttl, vocoder_steps, noisy_fixed, lmask)
+        loss = wavlm_loss(wavlm, wav_out.squeeze(), target_feats, DEVICE)
         loss.backward()
         torch.nn.utils.clip_grad_norm_([style_ttl], max_norm=1.0)
         optimizer.step()
@@ -213,4 +209,6 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=0.0002)
     p.add_argument("--save_steps", type=int, default=500)
     p.add_argument("--threshold", type=float, default=0.24)
+    p.add_argument("--onnx_dir", default=None, help="ONNX model directory")
+    p.add_argument("--styles_dir", default=None, help="Reference styles directory")
     train(p.parse_args())

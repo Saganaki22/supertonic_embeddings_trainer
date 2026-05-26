@@ -1,5 +1,4 @@
 import os
-import json
 import torch
 import torch.nn as nn
 import onnx
@@ -8,8 +7,6 @@ import onnxslim
 import onnx2torch
 from onnx2torch import convert
 import httpx
-
-from .loss import WavLMLoss
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -69,9 +66,8 @@ _patch_onnx2torch()
 
 
 class SupertonicModel(nn.Module):
-    def __init__(self, onnx_dir: str, target_wav_path: str):
+    def __init__(self, onnx_dir: str):
         super().__init__()
-        self.voice_encoder = WavLMLoss(target_wav_path=target_wav_path)
         print("\n[SupertonicModel] Converting ONNX models to PyTorch...")
         self.dp_model = load_pt_model(onnx_dir, "duration_predictor.onnx")
         self.te_model = load_pt_model(onnx_dir, "text_encoder.onnx")
@@ -91,5 +87,4 @@ class SupertonicModel(nn.Module):
                 xt, text_emb, style_ttl, latent_mask, text_mask, current_step_t, total_step_t
             )
         wav = self.voc_model(xt)
-        loss = self.voice_encoder(wav)
-        return wav, loss
+        return wav

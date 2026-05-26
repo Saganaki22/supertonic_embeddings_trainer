@@ -1,22 +1,38 @@
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
-MODELS_DIR = BASE_DIR / "models"
-OUTPUT_DIR = BASE_DIR / "output"
-REF_STYLES_DIR = BASE_DIR / "reference_styles"
 
-HF_BASE = "https://huggingface.co/Supertone/supertonic-3/resolve/main"
-
-ONNX_FILES = {
-    "config": f"{HF_BASE}/tts.json",
-    "duration_predictor": f"{HF_BASE}/duration_predictor.onnx",
-    "text_encoder": f"{HF_BASE}/text_encoder.onnx",
-    "vector_estimator": f"{HF_BASE}/vector_estimator.onnx",
-    "vocoder": f"{HF_BASE}/vocoder.onnx",
-    "unicode_indexer": f"{HF_BASE}/unicode_indexer.json",
-    "style_encoder": f"{HF_BASE}/style_encoder.onnx",
+MODEL_CONFIGS = {
+    "v2": {
+        "hf_repo": "Supertone/supertonic-2",
+        "onnx_dir": BASE_DIR / "pipeline" / "onnx_v2",
+        "styles_dir": BASE_DIR / "reference_styles_v2",
+        "default_steps": 3000,
+        "default_vocoder_steps": 5,
+        "default_lr": 2e-4,
+        "threshold_wavlm": 0.24,
+        "threshold_ecapa": 0.15,
+        "languages": ["en", "ko", "es", "pt", "fr"],
+    },
+    "v3": {
+        "hf_repo": "Supertone/supertonic-3",
+        "onnx_dir": BASE_DIR / "pipeline" / "onnx_v3",
+        "styles_dir": BASE_DIR / "reference_styles_v3",
+        "default_steps": 3000,
+        "default_vocoder_steps": 6,
+        "default_lr": 2e-4,
+        "threshold_wavlm": 0.24,
+        "threshold_ecapa": 0.15,
+        "languages": [
+            "en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et",
+            "fi", "fr", "hi", "hr", "hu", "id", "it", "lt", "lv", "nl", "pl",
+            "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",
+        ],
+    },
 }
 
+MODELS_DIR = BASE_DIR / "models"
+OUTPUT_DIR = BASE_DIR / "output"
 SAMPLE_RATE = 44100
 MIN_AUDIO_SEC = 3
 MAX_AUDIO_SEC = 30
