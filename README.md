@@ -6,6 +6,8 @@ Supports both **v2** (Supertonic 2, 66M params, 5 languages) and **v3** (Superto
 
 Based on gradient-based inverse optimization of frozen TTS models, matching WavLM-Large Layer 3 features (Chiu et al. 2025).
 
+<img width="1911" height="1134" alt="image" src="https://github.com/user-attachments/assets/a2110b52-4096-407a-a49d-60afc48c7b1a" />
+
 ## Features
 
 - **Dual model support** -- Train with Supertonic v2 or v3 (separate style spaces, separate model files)
