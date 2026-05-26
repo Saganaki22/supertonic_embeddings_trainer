@@ -85,7 +85,6 @@ def train_mapping(
         pred = model(src_t)
         loss = criterion(pred, tgt_t)
         optimizer.zero_grad()
-        loss.item()
         loss.backward()
         optimizer.step()
         if (epoch + 1) % 20 == 0:

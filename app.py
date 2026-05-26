@@ -41,11 +41,11 @@ def download_models(progress=gr.Progress()):
     if check_onnx_models():
         return "Models already downloaded."
 
-    progress(0, desc="Downloading Supertonic ONNX models...")
+    progress(0, desc="Downloading Supertonic-2 ONNX models...")
     try:
         from huggingface_hub import snapshot_download
-        target = str(PIPELINE_DIR / "pipeline" / "supertonic3")
-        snapshot_download("Supertone/supertonic-3", local_dir=target)
+        target = str(PIPELINE_DIR / "pipeline" / "supertonic2")
+        snapshot_download("Supertone/supertonic-2", local_dir=target)
         onnx_src = os.path.join(target, "onnx")
         styles_src = os.path.join(target, "voice_styles")
 
@@ -55,7 +55,7 @@ def download_models(progress=gr.Progress()):
             os.makedirs(str(ONNX_DIR), exist_ok=True)
             for f in ["tts.json", "duration_predictor.onnx", "text_encoder.onnx",
                       "vector_estimator.onnx", "vocoder.onnx", "unicode_indexer.json"]:
-                src = os.path.join(target, f)
+                src = os.path.join(target, "onnx", f)
                 if os.path.exists(src):
                     shutil.copy2(src, str(ONNX_DIR / f))
 
@@ -67,7 +67,7 @@ def download_models(progress=gr.Progress()):
         progress(1.0, desc="Done!")
         return "Models downloaded successfully."
     except Exception as e:
-        return f"Download failed: {e}\nTry manually: pip install huggingface_hub && hf download Supertone/supertonic-3 --local-dir pipeline/supertonic3"
+        return f"Download failed: {e}\nTry manually: hf download Supertone/supertonic-2 --local-dir pipeline/supertonic2"
 
 
 def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, threshold, progress=gr.Progress()):
@@ -81,11 +81,19 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
 
     name = name.strip().replace(" ", "_") or "custom_voice"
     dst = str(VOICES_DIR / f"{name}.wav")
-    shutil.copy2(wav_path, dst)
 
     import torch
     import numpy as np
+    import librosa
     import argparse
+
+    y, sr = librosa.load(wav_path, sr=44100, mono=True)
+    y, _ = librosa.effects.trim(y, top_db=20)
+    peak = np.abs(y).max()
+    if peak > 0:
+        y = y / peak * 0.95
+    import soundfile as sf
+    sf.write(dst, y, 44100)
 
     progress(0.0, desc="Loading models...")
 
@@ -139,6 +147,9 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         save_steps_val = args.save_steps if args.save_steps is not None else config.SAVE_STEPS
         threshold_val = args.threshold if args.threshold is not None else config.EARLY_STOP_LOSS_THRESHOLD
 
+        torch.manual_seed(seed_val)
+        np.random.seed(seed_val)
+
         log_dir = str(LOGS_DIR / name)
         os.makedirs(log_dir, exist_ok=True)
 
@@ -150,9 +161,6 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         dataloader = ts.get_train_dataloader(tts, ts.texts)
         del tts
         data_iter = iter(dataloader)
-
-        torch.manual_seed(seed_val)
-        np.random.seed(seed_val)
 
         tmp_ids, tmp_mask = next(data_iter)
 
@@ -199,7 +207,6 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
 
         optimizer = torch.optim.Adam([style_ttl], lr=lr_val)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, min_lr=lr_val * 0.01)
-        optimizer.zero_grad()
 
         best_loss = float("inf")
         best_ttl = None
@@ -217,11 +224,11 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
             text_ids = text_ids.to(DEVICE)
             text_mask = text_mask.to(DEVICE)
 
+            optimizer.zero_grad()
             _, loss = model(text_ids, text_mask, style_ttl, vocoder_steps_val, noisy_fixed, lmask)
             loss.backward()
             torch.nn.utils.clip_grad_norm_([style_ttl], max_norm=1.0)
             optimizer.step()
-            optimizer.zero_grad()
 
             step_loss = loss.detach().item()
             if step_loss < best_loss:
@@ -290,7 +297,7 @@ def list_trained_styles():
 
 def build_app():
     with gr.Blocks(title="Supertonic Voice Cloner") as app:
-        gr.Markdown("# Supertonic Voice Cloner")
+        gr.Markdown("# [Supertonic Voice Cloner](https://github.com/Saganaki22/supertonic_embeddings_trainer)")
         gr.Markdown("Upload a WAV → train a voice style → synthesize speech in that voice")
 
         with gr.Tab("Setup"):
@@ -314,10 +321,10 @@ def build_app():
                         info="auto=find closest built-in voice, none=random"
                     )
             with gr.Row():
-                num_steps = gr.Slider(500, 10000, value=1000, step=500, label="Training Steps")
+                num_steps = gr.Slider(500, 10000, value=3000, step=500, label="Training Steps")
                 save_every = gr.Slider(50, 2000, value=250, step=50, label="Save Every N Steps")
                 lr = gr.Slider(0.00005, 0.001, value=0.0002, step=0.00005, label="Learning Rate")
-                threshold = gr.Slider(0.10, 0.40, value=0.24, step=0.01, label="Early Stop Threshold")
+                threshold = gr.Slider(0.20, 0.40, value=0.24, step=0.01, label="Early Stop Threshold")
             train_btn = gr.Button("Train Voice Style", variant="primary")
             train_status = gr.Textbox(label="Status", lines=8, interactive=False)
             trained_style_path = gr.Textbox(label="Trained Style JSON Path", visible=True)

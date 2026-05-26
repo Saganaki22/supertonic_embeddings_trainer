@@ -87,6 +87,9 @@ def train(args, on_step=None):
     print(f"Name: {name}  Gender: {gender}  Device: {DEVICE}")
     print(f"Target WAV: {wav_path}")
 
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
     log_dir = os.path.join(LOGS_DIR, name)
     os.makedirs(log_dir, exist_ok=True)
 
@@ -94,9 +97,6 @@ def train(args, on_step=None):
     dataloader = get_train_dataloader(tts, texts)
     del tts
     data_iter = iter(dataloader)
-
-    torch.manual_seed(seed)
-    np.random.seed(seed)
 
     tmp_ids, tmp_mask = next(data_iter)
 
@@ -147,7 +147,6 @@ def train(args, on_step=None):
 
     optimizer = torch.optim.Adam([style_ttl], lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, min_lr=lr * 0.01)
-    optimizer.zero_grad()
 
     best_loss = float("inf")
     best_ttl = None
@@ -165,11 +164,11 @@ def train(args, on_step=None):
         text_ids = text_ids.to(DEVICE)
         text_mask = text_mask.to(DEVICE)
 
+        optimizer.zero_grad()
         _, loss = model(text_ids, text_mask, style_ttl, vocoder_steps, noisy_fixed, lmask)
         loss.backward()
         torch.nn.utils.clip_grad_norm_([style_ttl], max_norm=1.0)
         optimizer.step()
-        optimizer.zero_grad()
 
         step_loss = loss.detach().item()
         if step_loss < best_loss:
@@ -210,7 +209,7 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--speed", type=float, default=1.05)
     p.add_argument("--vocoder_steps", type=int, default=5)
-    p.add_argument("--num_steps", type=int, default=1000)
+    p.add_argument("--num_steps", type=int, default=3000)
     p.add_argument("--lr", type=float, default=0.0002)
     p.add_argument("--save_steps", type=int, default=500)
     p.add_argument("--threshold", type=float, default=0.24)
