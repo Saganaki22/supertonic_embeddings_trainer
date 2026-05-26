@@ -303,8 +303,9 @@ def train_voice(
                 "optimizer_state": optimizer.state_dict(),
                 "scheduler_state": scheduler.state_dict(),
             }, state_path)
-            ts.save_style(os.path.join(log_dir, f"{name_versioned}.json"), best_ttl, best_dp, dst)
-            stop_msg = f"Training stopped at step {step}.\nBest loss: {best_loss:.4f}\nState saved. Re-train with same name to resume."
+            stop_style = os.path.join(log_dir, f"{name_versioned}.json")
+            ts.save_style(stop_style, best_ttl, best_dp, dst)
+            stop_msg = f"Training stopped at step {step}.\nBest loss: {best_loss:.4f}\nStyle JSON: {stop_style}\nState: {state_path}\nRe-train with same name to resume."
             print(stop_msg)
             yield stop_msg, None
             return
@@ -353,6 +354,7 @@ def train_voice(
             if ecapa_val is not None:
                 status_lines.append(f"ECAPA speaker sim: {1-ecapa_val:.4f} (loss: {ecapa_val:.4f}) | Best sim: {1-best_ecapa_val:.4f}" if best_ecapa_val is not None else "")
             status_lines.append(f"Elapsed: {elapsed/60:.1f}min | ETA: {eta/60:.1f}min")
+            print(f"  Step {step+1}/{total} | Loss: {step_loss:.4f} | Best: {best_loss:.4f} | LR: {cur_lr:.6f} | ETA: {eta/60:.1f}min")
             progress((step + 1) / total,
                      desc=f"[{version}/{loss_mode}] step {step+1}/{total} loss={step_loss:.4f}")
             yield "\n".join(status_lines), None
@@ -368,7 +370,7 @@ def train_voice(
                 "optimizer_state": optimizer.state_dict(),
                 "scheduler_state": scheduler.state_dict(),
             }, state_path)
-            print(f"  >> Checkpoint: {ckpt}")
+            print(f"  >> Checkpoint: {ckpt} | State: {state_path}")
             status_lines.append(f"Saved checkpoint: {ckpt}")
             yield "\n".join(status_lines), None
 
@@ -376,10 +378,12 @@ def train_voice(
         if loss_mode == "ecapa" and ecapa_val is not None:
             if ecapa_val <= thr:
                 print(f"  Early stop at step {step+1}: ECAPA {ecapa_val:.4f} <= {thr}")
+                print(f"  Style JSON: {os.path.join(log_dir, f'{name_versioned}.json')}")
                 break
         else:
             if best_loss <= thr:
                 print(f"  Early stop at step {step+1}: WavLM {best_loss:.4f} <= {thr}")
+                print(f"  Style JSON: {os.path.join(log_dir, f'{name_versioned}.json')}")
                 break
 
     final_path = os.path.join(log_dir, f"{name_versioned}.json")
@@ -394,8 +398,10 @@ def train_voice(
         "scheduler_state": scheduler.state_dict(),
     }, state_path)
     elapsed = time.time() - t0
-    final_msg = f"Training complete!\nBest WavLM loss: {best_loss:.4f}\nTime: {elapsed/60:.1f}min\nStyle JSON: {final_path}\n\nState saved - re-train with same name to continue optimizing."
-    print(final_msg)
+    final_msg = f"Training complete!\nBest WavLM loss: {best_loss:.4f}\nTime: {elapsed/60:.1f}min\nStyle JSON: {final_path}\nState: {state_path}\n\nRe-train with same name to continue optimizing."
+    print(f"\nDone! Best loss: {best_loss:.4f} | Time: {elapsed/60:.1f}min")
+    print(f"  Style JSON: {final_path}")
+    print(f"  State PT:   {state_path}")
     progress(1.0, desc="Done!")
     yield final_msg, final_path
 
