@@ -22,7 +22,7 @@ Based on gradient-based inverse optimization of frozen TTS models, matching WavL
 
 - Python 3.10+
 - CUDA GPU (12.8+)
-- ~4GB VRAM
+- ~8GB VRAM
 
 ## Training Times
 
