@@ -10,3 +10,4 @@ pipeline/supertonic3/audio_samples/
 output/
 *.wav
 *.mp3
+*.pt

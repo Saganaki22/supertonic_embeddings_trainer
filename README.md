@@ -4,6 +4,14 @@ Local voice cloning pipeline for [SupertonicTTS](https://github.com/kdrkdrkdr/su
 
 Based on gradient-based inverse optimization of frozen TTS models, matching WavLM-Large Layer 3 features (Chiu et al. 2025).
 
+## Features
+
+- **Stop & Resume** — Stop training mid-run and continue later from exactly where you left off (optimizer state, scheduler, latent geometry all preserved)
+- **Auto voice matching** — Finds the closest reference preset via WavLM Layer 3 distance
+- **Audio preprocessing** — VAD silence trimming + peak normalization before training
+- **Live progress** — Loss, best loss, learning rate, ETA updated in real time
+- **Checkpoint saving** — Style JSONs saved every N steps so you can pick the best one
+
 ## Requirements
 
 - Python 3.10+
@@ -21,13 +29,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install -r requirements.txt
 ```
 
-Download the 10 reference style JSONs from [HuggingFace](https://huggingface.co/kdrkdrkdr/supertonic.embed/tree/main/voice_styles) into `reference_styles/` (F1-F5, M1-M5).
-
-Download the 4 Supertonic ONNX models and `tts.json` / `unicode_indexer.json` into `pipeline/onnx/`:
-- `duration_predictor.onnx`
-- `text_encoder.onnx`
-- `vector_estimator.onnx`
-- `vocoder.onnx`
+Or use the Setup tab in the Gradio UI to download models automatically (Supertone/supertonic-2).
 
 ## Usage
 
@@ -41,14 +43,21 @@ start.bat
 
 | Tab | Description |
 |-----|-------------|
-| **Clone Voice** | Upload WAV → set name/steps/threshold → train style embedding |
+| **Setup** | Download Supertonic-2 ONNX models (~400MB) |
+| **Clone Voice** | Upload WAV → set name/steps/threshold → train. Stop anytime, resume by re-training with the same name |
 | **Synthesize** | Enter text + select trained style → generate speech |
 | **Browse Styles** | Preview reference and trained voice styles |
+
+### Stop & Resume
+
+1. Click **Stop Training** at any point — a `training_state.pt` checkpoint is saved
+2. Re-click **Train Voice Style** with the same voice name — training resumes from the saved step
+3. Check **Check for Checkpoint** to see if a resume point exists for a name
 
 ### CLI
 
 ```bash
-python pipeline/train_style.py --wav voice.wav --name myvoice --steps 1000
+python pipeline/train_style.py --wav voice.wav --name myvoice --steps 3000
 ```
 
 ## How It Works
@@ -56,23 +65,33 @@ python pipeline/train_style.py --wav voice.wav --name myvoice --steps 1000
 1. **Auto-select** closest reference style via WavLM Layer 3 distance across all 10 presets
 2. **Initialize** `style_ttl` from that reference (trainable), freeze `style_dp`
 3. **Optimize** `style_ttl` via Adam, minimizing WavLM Layer 3 feature statistics (mean + std MSE) between generated and target audio
-4. **Early stop** when loss drops below threshold (default 0.15)
+4. **Early stop** when loss drops below threshold (default 0.24)
+
+## Defaults
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| Training Steps | 3000 | Early stop usually fires ~500 steps |
+| Early Stop Threshold | 0.24 | Same-speaker baseline from Chiu et al. 2025 |
+| Vocoder Steps | 5 | Denoising iterations |
+| Learning Rate | 2e-4 | Adam with ReduceLROnPlateau (patience=200) |
+| Speed | 1.05 | Duration scaling |
 
 ## Project Structure
 
 ```
-app.py                  # Gradio UI
+app.py                  # Gradio UI (stop/resume, audio preprocessing)
 start.bat               # Launch script
 requirements.txt
 reference_styles/       # F1-F5.json, M1-M5.json
 pipeline/
-  onnx/                 # Supertonic ONNX models (not included)
+  onnx/                 # Supertonic-2 ONNX models (downloaded via UI)
   train_style.py        # Standalone training script
   generate.py           # Synthesis from text + style
   helper.py             # TTS engine, text processing
   utils/
-    loss.py             # WavLM-Large Layer 3 loss
-    model.py            # ONNX→PyTorch model wrapper
+    loss.py             # WavLM-Large Layer 3 loss (WavLMModel)
+    model.py            # ONNX→PyTorch conversion (onnxslim + opset17 + _fix_clip)
     style.py            # Style JSON I/O
   configs/
     default.py          # Training defaults

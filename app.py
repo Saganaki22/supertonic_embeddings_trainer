@@ -1,13 +1,13 @@
 """
-Supertonic Voice Cloning Pipeline
+Supertonic Embeddings Trainer
 Upload WAV → Train Style JSON → Synthesize Speech
+Supports: stop mid-training, resume from checkpoint
 """
 
 import gradio as gr
 import os
 import sys
 import shutil
-import threading
 import time
 from pathlib import Path
 
@@ -26,7 +26,7 @@ REF_DIR = PIPELINE_DIR / "reference_styles"
 for d in [VOICES_DIR, SAMPLES_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-_train_status = {"running": False, "log": "", "result": None}
+_stop_flag = {"stop": False}
 
 
 def check_onnx_models():
@@ -70,6 +70,23 @@ def download_models(progress=gr.Progress()):
         return f"Download failed: {e}\nTry manually: hf download Supertone/supertonic-2 --local-dir pipeline/supertonic2"
 
 
+def stop_training():
+    _stop_flag["stop"] = True
+    return "Stopping... (will save checkpoint)"
+
+
+def check_resume(name):
+    log_dir = LOGS_DIR / name
+    state_path = log_dir / "training_state.pt"
+    if state_path.exists():
+        import torch
+        state = torch.load(str(state_path), weights_only=False, map_location="cpu")
+        step = state.get("step", 0)
+        best = state.get("best_loss", float("inf"))
+        return f"Found checkpoint at step {step} (best loss: {best:.4f}). Training will resume from here."
+    return "No checkpoint found. Starting fresh."
+
+
 def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, threshold, progress=gr.Progress()):
     if not wav_path:
         yield "Upload a WAV file first.", None
@@ -87,13 +104,16 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
     import librosa
     import argparse
 
-    y, sr = librosa.load(wav_path, sr=44100, mono=True)
-    y, _ = librosa.effects.trim(y, top_db=20)
-    peak = np.abs(y).max()
-    if peak > 0:
-        y = y / peak * 0.95
-    import soundfile as sf
-    sf.write(dst, y, 44100)
+    _stop_flag["stop"] = False
+
+    if not os.path.exists(dst):
+        y, sr = librosa.load(wav_path, sr=44100, mono=True)
+        y, _ = librosa.effects.trim(y, top_db=20)
+        peak = np.abs(y).max()
+        if peak > 0:
+            y = y / peak * 0.95
+        import soundfile as sf
+        sf.write(dst, y, 44100)
 
     progress(0.0, desc="Loading models...")
 
@@ -110,7 +130,6 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         status_lines.clear()
         status_lines.append(f"Step {step}/{total_steps} ({pct*100:.1f}%)")
         status_lines.append(f"Loss: {loss:.4f} | Best: {best:.4f} | LR: {lr_val:.6f}")
-        status_lines.append(f"Save every: {save_every_int} steps")
         if elapsed_s > 0:
             status_lines.append(f"Elapsed: {elapsed_s/60:.1f}min | ETA: {remaining_s/60:.1f}min")
         if best <= float(threshold):
@@ -147,74 +166,136 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         save_steps_val = args.save_steps if args.save_steps is not None else config.SAVE_STEPS
         threshold_val = args.threshold if args.threshold is not None else config.EARLY_STOP_LOSS_THRESHOLD
 
-        torch.manual_seed(seed_val)
-        np.random.seed(seed_val)
-
         log_dir = str(LOGS_DIR / name)
         os.makedirs(log_dir, exist_ok=True)
+        state_path = os.path.join(log_dir, "training_state.pt")
 
         DEVICE = ts.DEVICE
-        print(f"Name: {name}  Gender: {gender_val}  Device: {DEVICE}")
-        print(f"Target WAV: {wav_val}")
 
-        tts = ts.load_text_to_speech(str(ONNX_DIR))
-        dataloader = ts.get_train_dataloader(tts, ts.texts)
-        del tts
-        data_iter = iter(dataloader)
+        resumed = False
+        if os.path.exists(state_path):
+            print(f"Resuming from checkpoint: {state_path}")
+            state = torch.load(state_path, weights_only=False, map_location=DEVICE)
+            start_step = state["step"]
+            best_loss = state["best_loss"]
+            best_ttl = state["best_ttl"].to(DEVICE)
+            best_dp = state["best_dp"].to(DEVICE)
+            style_ttl = state["style_ttl"].to(DEVICE).requires_grad_(True)
+            style_dp = state["style_dp"].to(DEVICE)
+            noisy_fixed = state["noisy_fixed"].to(DEVICE)
+            lmask = state["lmask"].to(DEVICE)
+            resumed = True
 
-        tmp_ids, tmp_mask = next(data_iter)
+            torch.manual_seed(seed_val)
+            np.random.seed(seed_val)
 
-        model = ts.SupertonicModel(str(ONNX_DIR), wav_val)
+            model = ts.SupertonicModel(str(ONNX_DIR), wav_val)
 
-        if ref_val == "auto":
-            print("\nFinding closest reference style (WavLM Layer 3)...")
-            dummy_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))[1]
-            with torch.no_grad():
-                init_dur = model.dp_model(tmp_ids, dummy_dp, tmp_mask) / speed_val
-                init_dur = init_dur.detach().cpu().numpy()
-            tts_tmp = ts.load_text_to_speech(str(ONNX_DIR))
-            noisy_tmp, lmask_tmp = tts_tmp.sample_noisy_latent(duration=init_dur)
-            noisy_tmp = torch.tensor(noisy_tmp, dtype=torch.float32).to(DEVICE)
-            lmask_tmp = torch.tensor(lmask_tmp, dtype=torch.float32).to(DEVICE)
-            del tts_tmp
+            optimizer = torch.optim.Adam([style_ttl], lr=lr_val)
+            optimizer.load_state_dict(state["optimizer_state"])
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, min_lr=lr_val * 0.01)
+            scheduler.load_state_dict(state["scheduler_state"])
 
-            style_ttl, style_dp = ts.find_closest_style(
-                model.voice_encoder, wav_val,
-                model.dp_model, model.te_model, model.ve_model, model.voc_model,
-                tmp_ids, tmp_mask, noisy_tmp, lmask_tmp, vocoder_steps_val, speed_val
-            )
-            del noisy_tmp, lmask_tmp
-            if style_ttl is None:
+            tts = ts.load_text_to_speech(str(ONNX_DIR))
+            dataloader = ts.get_train_dataloader(tts, ts.texts)
+            del tts
+            data_iter = iter(dataloader)
+            for _ in range(start_step % len(ts.texts)):
+                try:
+                    next(data_iter)
+                except StopIteration:
+                    data_iter = iter(dataloader)
+                    next(data_iter)
+
+            on_step.t0 = time.time()
+            status_lines.append(f"Resumed from step {start_step} (best: {best_loss:.4f})")
+            print(f"  Resumed: step {start_step}, best_loss={best_loss:.4f}")
+        else:
+            torch.manual_seed(seed_val)
+            np.random.seed(seed_val)
+
+            print(f"Name: {name}  Gender: {gender_val}  Device: {DEVICE}")
+            print(f"Target WAV: {wav_val}")
+
+            tts = ts.load_text_to_speech(str(ONNX_DIR))
+            dataloader = ts.get_train_dataloader(tts, ts.texts)
+            del tts
+            data_iter = iter(dataloader)
+
+            tmp_ids, tmp_mask = next(data_iter)
+
+            model = ts.SupertonicModel(str(ONNX_DIR), wav_val)
+
+            if ref_val == "auto":
+                print("\nFinding closest reference style (WavLM Layer 3)...")
+                dummy_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))[1]
+                with torch.no_grad():
+                    init_dur = model.dp_model(tmp_ids, dummy_dp, tmp_mask) / speed_val
+                    init_dur = init_dur.detach().cpu().numpy()
+                tts_tmp = ts.load_text_to_speech(str(ONNX_DIR))
+                noisy_tmp, lmask_tmp = tts_tmp.sample_noisy_latent(duration=init_dur)
+                noisy_tmp = torch.tensor(noisy_tmp, dtype=torch.float32).to(DEVICE)
+                lmask_tmp = torch.tensor(lmask_tmp, dtype=torch.float32).to(DEVICE)
+                del tts_tmp
+
+                style_ttl, style_dp = ts.find_closest_style(
+                    model.voice_encoder, wav_val,
+                    model.dp_model, model.te_model, model.ve_model, model.voc_model,
+                    tmp_ids, tmp_mask, noisy_tmp, lmask_tmp, vocoder_steps_val, speed_val
+                )
+                del noisy_tmp, lmask_tmp
+                if style_ttl is None:
+                    _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))
+                    style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
+            elif ref_val and os.path.exists(ref_val):
+                style_ttl, style_dp = ts.load_single_voice_style(ref_val)
+            else:
                 _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))
                 style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
-        elif ref_val and os.path.exists(ref_val):
-            style_ttl, style_dp = ts.load_single_voice_style(ref_val)
-        else:
-            _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))
-            style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
 
-        tts = ts.load_text_to_speech(str(ONNX_DIR))
-        with torch.no_grad():
-            init_dur = model.dp_model(tmp_ids, style_dp, tmp_mask) / speed_val
-            init_dur = init_dur.detach().cpu().numpy()
-        noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
-        noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
-        lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
-        del tts
+            tts = ts.load_text_to_speech(str(ONNX_DIR))
+            with torch.no_grad():
+                init_dur = model.dp_model(tmp_ids, style_dp, tmp_mask) / speed_val
+                init_dur = init_dur.detach().cpu().numpy()
+            noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
+            noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
+            lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
+            del tts
 
-        style_ttl = style_ttl.clone().requires_grad_(True)
-        style_dp = style_dp.detach().clone()
+            style_ttl = style_ttl.clone().requires_grad_(True)
+            style_dp = style_dp.detach().clone()
 
-        optimizer = torch.optim.Adam([style_ttl], lr=lr_val)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, min_lr=lr_val * 0.01)
+            optimizer = torch.optim.Adam([style_ttl], lr=lr_val)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, min_lr=lr_val * 0.01)
 
-        best_loss = float("inf")
-        best_ttl = None
-        best_dp = style_dp.detach().clone()
-        start_time = time.time()
+            best_loss = float("inf")
+            best_ttl = None
+            best_dp = style_dp.detach().clone()
+            start_step = 0
+            on_step.t0 = time.time()
 
-        print(f"\nOptimizing ({num_steps_val} steps, early stop at {threshold_val})...")
-        for step in range(num_steps_val):
+        print(f"\nOptimizing (step {start_step} -> {num_steps_val}, early stop at {threshold_val})...")
+        for step in range(start_step, num_steps_val):
+            if _stop_flag["stop"]:
+                print(f"  Stopped at step {step}. Saving state...")
+                torch.save({
+                    "step": step,
+                    "best_loss": best_loss,
+                    "best_ttl": best_ttl.cpu(),
+                    "best_dp": best_dp.cpu(),
+                    "style_ttl": style_ttl.detach().cpu(),
+                    "style_dp": style_dp.cpu(),
+                    "noisy_fixed": noisy_fixed.cpu(),
+                    "lmask": lmask.cpu(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                }, state_path)
+                ts.save_style(os.path.join(log_dir, f"{name}.json"), best_ttl, best_dp, wav_val)
+                stop_msg = f"Training stopped at step {step}.\nBest loss: {best_loss:.4f}\nState saved. Re-train with same name to resume."
+                print(stop_msg)
+                yield stop_msg, None
+                return
+
             try:
                 text_ids, text_mask = next(data_iter)
             except StopIteration:
@@ -246,6 +327,18 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
             if (step + 1) % save_steps_val == 0:
                 ckpt = os.path.join(log_dir, f"{name}_{step+1:04d}.json")
                 ts.save_style(ckpt, best_ttl, best_dp, wav_val)
+                torch.save({
+                    "step": step + 1,
+                    "best_loss": best_loss,
+                    "best_ttl": best_ttl.cpu(),
+                    "best_dp": best_dp.cpu(),
+                    "style_ttl": style_ttl.detach().cpu(),
+                    "style_dp": style_dp.cpu(),
+                    "noisy_fixed": noisy_fixed.cpu(),
+                    "lmask": lmask.cpu(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                }, state_path)
                 print(f"  >> Checkpoint: {ckpt}")
                 status_lines.append(f"Saved checkpoint: {ckpt}")
                 yield "\n".join(status_lines), None
@@ -256,7 +349,9 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
 
         final_path = os.path.join(log_dir, f"{name}.json")
         ts.save_style(final_path, best_ttl, best_dp, wav_val)
-        elapsed = time.time() - start_time
+        if os.path.exists(state_path):
+            os.remove(state_path)
+        elapsed = time.time() - on_step.t0
         final_msg = f"Training complete!\nBest loss: {best_loss:.4f}\nTime: {elapsed/60:.1f}min\nStyle JSON: {final_path}"
         print(final_msg)
         progress(1.0, desc="Done!")
@@ -296,8 +391,8 @@ def list_trained_styles():
 
 
 def build_app():
-    with gr.Blocks(title="Supertonic Voice Cloner") as app:
-        gr.Markdown("# [Supertonic Voice Cloner](https://github.com/Saganaki22/supertonic_embeddings_trainer)")
+    with gr.Blocks(title="Supertonic Embeddings Trainer") as app:
+        gr.Markdown("# [Supertonic Embeddings Trainer](https://github.com/Saganaki22/supertonic_embeddings_trainer)")
         gr.Markdown("Upload a WAV → train a voice style → synthesize speech in that voice")
 
         with gr.Tab("Setup"):
@@ -308,7 +403,7 @@ def build_app():
 
         with gr.Tab("Clone Voice"):
             gr.Markdown("### Step 1: Upload voice sample and train")
-            gr.Markdown("Provide 3-30 seconds of clean speech. More = better quality.")
+            gr.Markdown("Provide 3-30 seconds of clean speech. More = better quality.\n\n**Resume**: Re-train with the same voice name to continue from where you left off.")
             with gr.Row():
                 wav_input = gr.Audio(label="Voice Sample (WAV)", type="filepath")
                 with gr.Column():
@@ -320,12 +415,17 @@ def build_app():
                         value="auto",
                         info="auto=find closest built-in voice, none=random"
                     )
+                    resume_status = gr.Textbox(label="Resume Status", interactive=False, value="Enter a name and check")
+                    check_btn = gr.Button("Check for Checkpoint", size="sm")
+                    check_btn.click(check_resume, inputs=[voice_name], outputs=[resume_status])
             with gr.Row():
                 num_steps = gr.Slider(500, 10000, value=3000, step=500, label="Training Steps")
                 save_every = gr.Slider(50, 2000, value=250, step=50, label="Save Every N Steps")
                 lr = gr.Slider(0.00005, 0.001, value=0.0002, step=0.00005, label="Learning Rate")
                 threshold = gr.Slider(0.20, 0.40, value=0.24, step=0.01, label="Early Stop Threshold")
-            train_btn = gr.Button("Train Voice Style", variant="primary")
+            with gr.Row():
+                train_btn = gr.Button("Train Voice Style", variant="primary")
+                stop_btn = gr.Button("Stop Training", variant="stop")
             train_status = gr.Textbox(label="Status", lines=8, interactive=False)
             trained_style_path = gr.Textbox(label="Trained Style JSON Path", visible=True)
 
@@ -334,6 +434,7 @@ def build_app():
                 inputs=[wav_input, voice_name, gender, ref_mode, num_steps, save_every, lr, threshold],
                 outputs=[train_status, trained_style_path],
             )
+            stop_btn.click(stop_training, outputs=[train_status])
 
         with gr.Tab("Synthesize"):
             gr.Markdown("### Step 2: Generate speech with the cloned voice")
