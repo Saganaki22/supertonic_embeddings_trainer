@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import soundfile as sf
 import torchaudio
-from transformers import Wav2Vec2Model
+from transformers import WavLMModel
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -23,7 +23,7 @@ class WavLMLoss(nn.Module):
     def __init__(self, target_wav_path: str):
         super().__init__()
         print("  Loading WavLM-Large for perceptual loss...")
-        self.model = Wav2Vec2Model.from_pretrained("microsoft/wavlm-large")
+        self.model = WavLMModel.from_pretrained("microsoft/wavlm-large")
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad_(False)

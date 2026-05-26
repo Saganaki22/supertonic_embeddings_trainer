@@ -90,46 +90,56 @@ def train(args, on_step=None):
     log_dir = os.path.join(LOGS_DIR, name)
     os.makedirs(log_dir, exist_ok=True)
 
-    model = SupertonicModel(ONNX_DIR, wav_path)
     tts = load_text_to_speech(ONNX_DIR)
-
     dataloader = get_train_dataloader(tts, texts)
+    del tts
     data_iter = iter(dataloader)
 
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     tmp_ids, tmp_mask = next(data_iter)
-    tmp_voice = "F4.json" if gender == "F" else "M1.json"
-    tmp_ttl, tmp_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, tmp_voice))
 
-    with torch.no_grad():
-        init_dur = model.dp_model(tmp_ids, tmp_dp, tmp_mask) / speed
-        init_dur = init_dur.detach().cpu().numpy()
-    noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
-    noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
-    lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
-
-    del tmp_ttl, tmp_dp, tts
+    model = SupertonicModel(ONNX_DIR, wav_path)
 
     if ref_style == "auto":
         print("\nFinding closest reference style (WavLM Layer 3)...")
+        dummy_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))[1]
+        with torch.no_grad():
+            init_dur_tmp = model.dp_model(tmp_ids, dummy_dp, tmp_mask) / speed
+            init_dur_tmp = init_dur_tmp.detach().cpu().numpy()
+        tts_tmp = load_text_to_speech(ONNX_DIR)
+        noisy_tmp, lmask_tmp = tts_tmp.sample_noisy_latent(duration=init_dur_tmp)
+        noisy_tmp = torch.tensor(noisy_tmp, dtype=torch.float32).to(DEVICE)
+        lmask_tmp = torch.tensor(lmask_tmp, dtype=torch.float32).to(DEVICE)
+        del tts_tmp
+
         style_ttl, style_dp = find_closest_style(
             model.voice_encoder, wav_path,
             model.dp_model, model.te_model, model.ve_model, model.voc_model,
-            tmp_ids, tmp_mask, noisy_fixed, lmask, vocoder_steps, speed
+            tmp_ids, tmp_mask, noisy_tmp, lmask_tmp, vocoder_steps, speed
         )
+        del noisy_tmp, lmask_tmp
         if style_ttl is None:
             print("  No reference styles found, using random init")
-            _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, tmp_voice))
+            _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))
             style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
     elif ref_style and os.path.exists(ref_style):
         print(f"\nLoading reference: {ref_style}")
         style_ttl, style_dp = load_single_voice_style(ref_style)
     else:
         print("\nRandom init (not recommended)")
-        _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, tmp_voice))
+        _, style_dp = load_single_voice_style(os.path.join(VOICE_STYLES_DIR, "M1.json"))
         style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
+
+    tts = load_text_to_speech(ONNX_DIR)
+    with torch.no_grad():
+        init_dur = model.dp_model(tmp_ids, style_dp, tmp_mask) / speed
+        init_dur = init_dur.detach().cpu().numpy()
+    noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
+    noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
+    lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
+    del tts
 
     style_ttl = style_ttl.clone().requires_grad_(True)
     style_dp = style_dp.detach().clone()
@@ -141,7 +151,6 @@ def train(args, on_step=None):
 
     best_loss = float("inf")
     best_ttl = None
-    best_dp = style_dp.detach().clone()
     best_dp = style_dp.detach().clone()
     start_time = time.time()
 
@@ -160,13 +169,14 @@ def train(args, on_step=None):
         loss.backward()
         torch.nn.utils.clip_grad_norm_([style_ttl], max_norm=1.0)
         optimizer.step()
-        scheduler.step(loss)
         optimizer.zero_grad()
 
         step_loss = loss.detach().item()
         if step_loss < best_loss:
             best_loss = step_loss
             best_ttl = style_ttl.detach().clone()
+
+        scheduler.step(best_loss)
 
         if (step + 1) % 8 == 0:
             cur_lr = optimizer.param_groups[0]["lr"]
@@ -199,9 +209,9 @@ if __name__ == "__main__":
     p.add_argument("--reference_style", default="auto", help="auto | path/to/style.json | none")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--speed", type=float, default=1.05)
-    p.add_argument("--vocoder_steps", type=int, default=6)
+    p.add_argument("--vocoder_steps", type=int, default=5)
     p.add_argument("--num_steps", type=int, default=1000)
     p.add_argument("--lr", type=float, default=0.0002)
     p.add_argument("--save_steps", type=int, default=500)
-    p.add_argument("--threshold", type=float, default=0.15)
+    p.add_argument("--threshold", type=float, default=0.24)
     train(p.parse_args())

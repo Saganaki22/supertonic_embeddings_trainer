@@ -1,7 +1,13 @@
-import argparse
-import json
-from pathlib import Path
-import numpy as np
+"""
+DEPRECATED — This file is NOT part of the training pipeline.
+The actual voice cloning uses gradient-based inverse optimization via pipeline/train_style.py.
+This file is kept for reference only. Do NOT use it to generate style embeddings.
+"""
+
+import sys
+print("ERROR: generate_embedding.py is deprecated. Use pipeline/train_style.py instead.", file=sys.stderr)
+print("  python pipeline/train_style.py --wav voice.wav --name myvoice", file=sys.stderr)
+sys.exit(1)
 
 try:
     import onnxruntime as ort

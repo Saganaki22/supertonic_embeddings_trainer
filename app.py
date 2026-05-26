@@ -116,7 +116,7 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         reference_style=ref_mode if ref_mode != "none" else None,
         seed=42,
         speed=1.05,
-        vocoder_steps=6,
+        vocoder_steps=5,
         num_steps=total,
         lr=float(lr),
         save_steps=save_every_int,
@@ -146,43 +146,53 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
         print(f"Name: {name}  Gender: {gender_val}  Device: {DEVICE}")
         print(f"Target WAV: {wav_val}")
 
-        model = ts.SupertonicModel(str(ONNX_DIR), wav_val)
         tts = ts.load_text_to_speech(str(ONNX_DIR))
-
         dataloader = ts.get_train_dataloader(tts, ts.texts)
+        del tts
         data_iter = iter(dataloader)
 
         torch.manual_seed(seed_val)
         np.random.seed(seed_val)
 
         tmp_ids, tmp_mask = next(data_iter)
-        tmp_voice = "F4.json" if gender_val == "F" else "M1.json"
-        tmp_ttl, tmp_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), tmp_voice))
 
-        with torch.no_grad():
-            init_dur = model.dp_model(tmp_ids, tmp_dp, tmp_mask) / speed_val
-            init_dur = init_dur.detach().cpu().numpy()
-        noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
-        noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
-        lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
-
-        del tmp_ttl, tmp_dp, tts
+        model = ts.SupertonicModel(str(ONNX_DIR), wav_val)
 
         if ref_val == "auto":
             print("\nFinding closest reference style (WavLM Layer 3)...")
+            dummy_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))[1]
+            with torch.no_grad():
+                init_dur = model.dp_model(tmp_ids, dummy_dp, tmp_mask) / speed_val
+                init_dur = init_dur.detach().cpu().numpy()
+            tts_tmp = ts.load_text_to_speech(str(ONNX_DIR))
+            noisy_tmp, lmask_tmp = tts_tmp.sample_noisy_latent(duration=init_dur)
+            noisy_tmp = torch.tensor(noisy_tmp, dtype=torch.float32).to(DEVICE)
+            lmask_tmp = torch.tensor(lmask_tmp, dtype=torch.float32).to(DEVICE)
+            del tts_tmp
+
             style_ttl, style_dp = ts.find_closest_style(
                 model.voice_encoder, wav_val,
                 model.dp_model, model.te_model, model.ve_model, model.voc_model,
-                tmp_ids, tmp_mask, noisy_fixed, lmask, vocoder_steps_val, speed_val
+                tmp_ids, tmp_mask, noisy_tmp, lmask_tmp, vocoder_steps_val, speed_val
             )
+            del noisy_tmp, lmask_tmp
             if style_ttl is None:
-                _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), tmp_voice))
+                _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))
                 style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
         elif ref_val and os.path.exists(ref_val):
             style_ttl, style_dp = ts.load_single_voice_style(ref_val)
         else:
-            _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), tmp_voice))
+            _, style_dp = ts.load_single_voice_style(os.path.join(str(REF_DIR), "M1.json"))
             style_ttl = torch.randn(1, 50, 256, device=DEVICE) * 0.1
+
+        tts = ts.load_text_to_speech(str(ONNX_DIR))
+        with torch.no_grad():
+            init_dur = model.dp_model(tmp_ids, style_dp, tmp_mask) / speed_val
+            init_dur = init_dur.detach().cpu().numpy()
+        noisy_fixed, lmask = tts.sample_noisy_latent(duration=init_dur)
+        noisy_fixed = torch.tensor(noisy_fixed, dtype=torch.float32).to(DEVICE)
+        lmask = torch.tensor(lmask, dtype=torch.float32).to(DEVICE)
+        del tts
 
         style_ttl = style_ttl.clone().requires_grad_(True)
         style_dp = style_dp.detach().clone()
@@ -193,7 +203,6 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
 
         best_loss = float("inf")
         best_ttl = None
-        best_dp = style_dp.detach().clone()
         best_dp = style_dp.detach().clone()
         start_time = time.time()
 
@@ -212,13 +221,14 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
             loss.backward()
             torch.nn.utils.clip_grad_norm_([style_ttl], max_norm=1.0)
             optimizer.step()
-            scheduler.step(loss)
             optimizer.zero_grad()
 
             step_loss = loss.detach().item()
             if step_loss < best_loss:
                 best_loss = step_loss
                 best_ttl = style_ttl.detach().clone()
+
+            scheduler.step(best_loss)
 
             if (step + 1) % 8 == 0:
                 cur_lr = optimizer.param_groups[0]["lr"]
@@ -307,7 +317,7 @@ def build_app():
                 num_steps = gr.Slider(500, 10000, value=1000, step=500, label="Training Steps")
                 save_every = gr.Slider(50, 2000, value=250, step=50, label="Save Every N Steps")
                 lr = gr.Slider(0.00005, 0.001, value=0.0002, step=0.00005, label="Learning Rate")
-                threshold = gr.Slider(0.10, 0.40, value=0.15, step=0.01, label="Early Stop Threshold")
+                threshold = gr.Slider(0.10, 0.40, value=0.24, step=0.01, label="Early Stop Threshold")
             train_btn = gr.Button("Train Voice Style", variant="primary")
             train_status = gr.Textbox(label="Status", lines=8, interactive=False)
             trained_style_path = gr.Textbox(label="Trained Style JSON Path", visible=True)
@@ -329,7 +339,7 @@ def build_app():
                 )
             with gr.Row():
                 synth_speed = gr.Slider(0.8, 1.5, value=1.05, step=0.05, label="Speed")
-                synth_steps = gr.Slider(4, 16, value=6, step=2, label="Vocoder Steps (more=better)")
+                synth_steps = gr.Slider(4, 16, value=5, step=2, label="Vocoder Steps (more=better)")
             synth_btn = gr.Button("Synthesize", variant="primary")
             synth_audio = gr.Audio(label="Generated Audio", type="filepath")
             synth_status = gr.Textbox(label="Status", interactive=False)
