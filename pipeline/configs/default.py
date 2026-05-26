@@ -5,7 +5,7 @@ class TrainConfig:
     REFERENCE_STYLE = "auto"
     SEED = 42
     SPEED = 1.05
-    NUM_STEPS = 3000
+    NUM_STEPS = 1000
     LEARNING_RATE = 0.0002
     VOCODER_STEPS = 5
     SAVE_STEPS = 500

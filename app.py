@@ -128,16 +128,16 @@ def train_voice(wav_path, name, gender, ref_mode, num_steps, save_every, lr, thr
 
         import pipeline.train_style as ts
         config = ts.TrainConfig()
-        gender_val = args.gender or config.GENDER
-        wav_val = args.wav or config.TARGET_WAV_PATH
-        ref_val = args.reference_style or config.REFERENCE_STYLE
-        seed_val = args.seed or config.SEED
-        speed_val = args.speed or config.SPEED
-        vocoder_steps_val = args.vocoder_steps or config.VOCODER_STEPS
-        num_steps_val = args.num_steps or config.NUM_STEPS
-        lr_val = args.lr or config.LEARNING_RATE
-        save_steps_val = args.save_steps or config.SAVE_STEPS
-        threshold_val = args.threshold or config.EARLY_STOP_LOSS_THRESHOLD
+        gender_val = args.gender if args.gender is not None else config.GENDER
+        wav_val = args.wav if args.wav is not None else config.TARGET_WAV_PATH
+        ref_val = args.reference_style if args.reference_style is not None else config.REFERENCE_STYLE
+        seed_val = args.seed if args.seed is not None else config.SEED
+        speed_val = args.speed if args.speed is not None else config.SPEED
+        vocoder_steps_val = args.vocoder_steps if args.vocoder_steps is not None else config.VOCODER_STEPS
+        num_steps_val = args.num_steps if args.num_steps is not None else config.NUM_STEPS
+        lr_val = args.lr if args.lr is not None else config.LEARNING_RATE
+        save_steps_val = args.save_steps if args.save_steps is not None else config.SAVE_STEPS
+        threshold_val = args.threshold if args.threshold is not None else config.EARLY_STOP_LOSS_THRESHOLD
 
         log_dir = str(LOGS_DIR / name)
         os.makedirs(log_dir, exist_ok=True)

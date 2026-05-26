@@ -72,17 +72,17 @@ def find_closest_style(wavlm_loss, target_wav_44k, dp_model, te_model, ve_model,
 
 def train(args, on_step=None):
     config = TrainConfig()
-    name = args.name or config.NAME
-    gender = args.gender or config.GENDER
-    wav_path = args.wav or config.TARGET_WAV_PATH
-    ref_style = args.reference_style or config.REFERENCE_STYLE
-    seed = args.seed or config.SEED
-    speed = args.speed or config.SPEED
-    vocoder_steps = args.vocoder_steps or config.VOCODER_STEPS
-    num_steps = args.num_steps or config.NUM_STEPS
-    lr = args.lr or config.LEARNING_RATE
-    save_steps = args.save_steps or config.SAVE_STEPS
-    threshold = args.threshold or config.EARLY_STOP_LOSS_THRESHOLD
+    name = args.name if args.name is not None else config.NAME
+    gender = args.gender if args.gender is not None else config.GENDER
+    wav_path = args.wav if args.wav is not None else config.TARGET_WAV_PATH
+    ref_style = args.reference_style if args.reference_style is not None else config.REFERENCE_STYLE
+    seed = args.seed if args.seed is not None else config.SEED
+    speed = args.speed if args.speed is not None else config.SPEED
+    vocoder_steps = args.vocoder_steps if args.vocoder_steps is not None else config.VOCODER_STEPS
+    num_steps = args.num_steps if args.num_steps is not None else config.NUM_STEPS
+    lr = args.lr if args.lr is not None else config.LEARNING_RATE
+    save_steps = args.save_steps if args.save_steps is not None else config.SAVE_STEPS
+    threshold = args.threshold if args.threshold is not None else config.EARLY_STOP_LOSS_THRESHOLD
 
     print(f"Name: {name}  Gender: {gender}  Device: {DEVICE}")
     print(f"Target WAV: {wav_path}")
