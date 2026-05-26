@@ -24,6 +24,14 @@ Based on gradient-based inverse optimization of frozen TTS models, matching WavL
 - CUDA GPU (12.8+)
 - ~4GB VRAM
 
+## Training Times
+
+| Mode | Average Time |
+|---|---|
+| v2 + WavLM | 4-7 min |
+| v3 + WavLM | 5-6 min |
+| v3 + ECAPA-guided | 5-10 min |
+
 ## Setup
 
 ```bash
