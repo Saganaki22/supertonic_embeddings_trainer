@@ -104,10 +104,29 @@ def check_resume(name, version_str):
         state = torch.load(str(state_path), weights_only=False, map_location="cpu")
         step = state.get("step", 0)
         best = state.get("best_loss", float("inf"))
+        saved_version = state.get("version", version)
+        saved_loss_mode = state.get("loss_mode", "wavlm")
         ecapa = state.get("best_ecapa", None)
         extra = f" | ECAPA sim: {1-ecapa:.4f}" if ecapa is not None else ""
-        return f"Found checkpoint at step {step} (best WavLM loss: {best:.4f}{extra}). Training will resume from here."
+        return (f"Found checkpoint at step {step} (best WavLM loss: {best:.4f}{extra}).\n"
+                f"Saved version: {saved_version} | Loss mode: {saved_loss_mode}\n"
+                f"Training will resume from here with saved settings.")
     return "No checkpoint found. Starting fresh."
+
+
+def _save_state(state_path, step, best_loss, best_ecapa_val, best_ttl, best_dp,
+                style_ttl, style_dp, noisy_fixed, lmask, optimizer, scheduler,
+                version, loss_mode):
+    import torch
+    torch.save({
+        "step": step, "best_loss": best_loss, "best_ecapa": best_ecapa_val,
+        "best_ttl": best_ttl.cpu(), "best_dp": best_dp.cpu(),
+        "style_ttl": style_ttl.detach().cpu(), "style_dp": style_dp.cpu(),
+        "noisy_fixed": noisy_fixed.cpu(), "lmask": lmask.cpu(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "version": version, "loss_mode": loss_mode,
+    }, state_path)
 
 
 def train_voice(
@@ -141,14 +160,19 @@ def train_voice(
 
     _stop_flag["stop"] = False
 
+    # Copy WAV immediately to avoid Gradio temp file PermissionError
     if not os.path.exists(dst):
-        y, sr = librosa.load(wav_path, sr=44100, mono=True)
+        tmp_copy = dst + ".tmp"
+        shutil.copy2(wav_path, tmp_copy)
+        y, sr = librosa.load(tmp_copy, sr=44100, mono=True)
         y, _ = librosa.effects.trim(y, top_db=20)
         peak = np.abs(y).max()
         if peak > 0:
             y = y / peak * 0.95
         import soundfile as sf
         sf.write(dst, y, 44100)
+        if os.path.exists(tmp_copy):
+            os.remove(tmp_copy)
 
     progress(0.0, desc="Loading models...")
 
@@ -177,6 +201,21 @@ def train_voice(
     if os.path.exists(state_path):
         print(f"Resuming from checkpoint: {state_path}")
         state = torch.load(state_path, weights_only=False, map_location=DEVICE)
+
+        # Auto-restore version and loss mode from checkpoint
+        saved_version = state.get("version", version)
+        saved_loss_mode = state.get("loss_mode", loss_mode)
+        if saved_version != version:
+            print(f"  WARNING: checkpoint was trained with {saved_version}, you selected {version}. Using saved: {saved_version}")
+            version = saved_version
+            cfg = MODEL_CONFIGS[version]
+            onnx_dir = str(cfg["onnx_dir"])
+            styles_dir = str(cfg["styles_dir"])
+            vocoder_steps = cfg["default_vocoder_steps"]
+        if saved_loss_mode != loss_mode:
+            print(f"  WARNING: checkpoint used {saved_loss_mode}, you selected {loss_mode}. Using saved: {saved_loss_mode}")
+            loss_mode = saved_loss_mode
+
         start_step = state["step"]
         best_loss = state["best_loss"]
         best_ttl = state["best_ttl"].to(DEVICE)
@@ -185,6 +224,7 @@ def train_voice(
         style_dp = state["style_dp"].to(DEVICE)
         noisy_fixed = state["noisy_fixed"].to(DEVICE)
         lmask = state["lmask"].to(DEVICE)
+        best_ecapa_val = state.get("best_ecapa", None)
         resumed = True
 
         torch.manual_seed(42)
@@ -206,11 +246,13 @@ def train_voice(
                 data_iter = iter(dataloader)
                 next(data_iter)
 
-        status_lines.append(f"Resumed from step {start_step} (best: {best_loss:.4f})")
-        print(f"  Resumed: step {start_step}, best_loss={best_loss:.4f}")
+        status_lines.append(f"Resumed from step {start_step} (best: {best_loss:.4f}) [version={version}, loss={loss_mode}]")
+        print(f"  Resumed: step {start_step}, best_loss={best_loss:.4f}, version={version}, loss_mode={loss_mode}")
     else:
         torch.manual_seed(42)
         np.random.seed(42)
+
+        best_ecapa_val = None
 
         print(f"Name: {name_versioned}  Gender: {gender}  Device: {DEVICE}")
         print(f"Target WAV: {dst}")
@@ -288,21 +330,16 @@ def train_voice(
     # ── training loop ──────────────────────────────────────────────────────
     t0 = time.time()
     thr = float(threshold)
-    best_ecapa_val = None
+    wavlm_thr = 0.24
 
     print(f"\nTraining [{version}] loss=[{loss_mode}] steps={start_step}->{total} threshold={thr}")
 
     for step in range(start_step, total):
         if _stop_flag["stop"]:
             print(f"  Stopped at step {step}. Saving state...")
-            torch.save({
-                "step": step, "best_loss": best_loss, "best_ecapa": best_ecapa_val,
-                "best_ttl": best_ttl.cpu(), "best_dp": best_dp.cpu(),
-                "style_ttl": style_ttl.detach().cpu(), "style_dp": style_dp.cpu(),
-                "noisy_fixed": noisy_fixed.cpu(), "lmask": lmask.cpu(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-            }, state_path)
+            _save_state(state_path, step, best_loss, best_ecapa_val, best_ttl, best_dp,
+                        style_ttl, style_dp, noisy_fixed, lmask, optimizer, scheduler,
+                        version, loss_mode)
             stop_style = os.path.join(log_dir, f"{name_versioned}.json")
             ts.save_style(stop_style, best_ttl, best_dp, dst)
             stop_msg = f"Training stopped at step {step}.\nBest loss: {best_loss:.4f}\nStyle JSON: {stop_style}\nState: {state_path}\nRe-train with same name to resume."
@@ -362,22 +399,23 @@ def train_voice(
         if (step + 1) % save_every_int == 0:
             ckpt = os.path.join(log_dir, f"{name_versioned}_{step+1:04d}.json")
             ts.save_style(ckpt, best_ttl, best_dp, dst)
-            torch.save({
-                "step": step + 1, "best_loss": best_loss, "best_ecapa": best_ecapa_val,
-                "best_ttl": best_ttl.cpu(), "best_dp": best_dp.cpu(),
-                "style_ttl": style_ttl.detach().cpu(), "style_dp": style_dp.cpu(),
-                "noisy_fixed": noisy_fixed.cpu(), "lmask": lmask.cpu(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-            }, state_path)
+            _save_state(state_path, step + 1, best_loss, best_ecapa_val, best_ttl, best_dp,
+                        style_ttl, style_dp, noisy_fixed, lmask, optimizer, scheduler,
+                        version, loss_mode)
             print(f"  >> Checkpoint: {ckpt} | State: {state_path}")
             status_lines.append(f"Saved checkpoint: {ckpt}")
             yield "\n".join(status_lines), None
 
-        # Early stop: ECAPA mode uses ECAPA val, WavLM mode uses WavLM loss
+        # Early stop:
+        # - WavLM mode: stop when WavLM loss <= threshold
+        # - ECAPA mode: stop when ECAPA loss <= threshold OR WavLM loss <= 0.24 (fallback)
         if loss_mode == "ecapa" and ecapa_val is not None:
             if ecapa_val <= thr:
                 print(f"  Early stop at step {step+1}: ECAPA {ecapa_val:.4f} <= {thr}")
+                print(f"  Style JSON: {os.path.join(log_dir, f'{name_versioned}.json')}")
+                break
+            if best_loss <= wavlm_thr:
+                print(f"  Early stop at step {step+1}: WavLM {best_loss:.4f} <= {wavlm_thr} (fallback)")
                 print(f"  Style JSON: {os.path.join(log_dir, f'{name_versioned}.json')}")
                 break
         else:
@@ -388,20 +426,17 @@ def train_voice(
 
     final_path = os.path.join(log_dir, f"{name_versioned}.json")
     ts.save_style(final_path, best_ttl, best_dp, dst)
-    torch.save({
-        "step": step + 1 if 'step' in dir() else total,
-        "best_loss": best_loss, "best_ecapa": best_ecapa_val,
-        "best_ttl": best_ttl.cpu(), "best_dp": best_dp.cpu(),
-        "style_ttl": style_ttl.detach().cpu(), "style_dp": style_dp.cpu(),
-        "noisy_fixed": noisy_fixed.cpu(), "lmask": lmask.cpu(),
-        "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(),
-    }, state_path)
+    _save_state(state_path, step + 1 if 'step' in dir() else total,
+                best_loss, best_ecapa_val, best_ttl, best_dp,
+                style_ttl, style_dp, noisy_fixed, lmask, optimizer, scheduler,
+                version, loss_mode)
     elapsed = time.time() - t0
-    final_msg = f"Training complete!\nBest WavLM loss: {best_loss:.4f}\nTime: {elapsed/60:.1f}min\nStyle JSON: {final_path}\nState: {state_path}\n\nRe-train with same name to continue optimizing."
+    ecapa_info = f"\nBest ECAPA sim: {1-best_ecapa_val:.4f}" if best_ecapa_val is not None else ""
+    final_msg = f"Training complete!\nBest WavLM loss: {best_loss:.4f}{ecapa_info}\nTime: {elapsed/60:.1f}min\nStyle JSON: {final_path}\nState: {state_path}\nVersion: {version} | Loss mode: {loss_mode}\n\nRe-train with same name to continue optimizing."
     print(f"\nDone! Best loss: {best_loss:.4f} | Time: {elapsed/60:.1f}min")
     print(f"  Style JSON: {final_path}")
     print(f"  State PT:   {state_path}")
+    print(f"  Version: {version} | Loss mode: {loss_mode}")
     progress(1.0, desc="Done!")
     yield final_msg, final_path
 
@@ -482,7 +517,8 @@ def build_app():
             gr.Markdown("### Step 1: Upload voice sample and train")
             gr.Markdown(
                 "Provide 3-30 seconds of clean speech. More = better quality.\n\n"
-                "**Resume**: Re-train with the same voice name and version to continue from where you left off."
+                "**Resume**: Re-train with the same voice name and version to continue from where you left off.\n"
+                "**Auto-restore**: If a checkpoint exists, the app will use the saved version and loss mode automatically."
             )
 
             with gr.Row():
