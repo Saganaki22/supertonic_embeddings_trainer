@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+*.onnx
+pipeline/logs/
+pipeline/voices/
+pipeline/samples/
+pipeline/supertonic3/.cache/
+pipeline/supertonic3/audio_samples/
+output/
+*.wav
+*.mp3
