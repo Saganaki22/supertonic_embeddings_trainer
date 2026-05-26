@@ -32,6 +32,8 @@ Based on gradient-based inverse optimization of frozen TTS models, matching WavL
 | v3 + WavLM | 5-6 min |
 | v3 + ECAPA-guided | 5-10 min |
 
+**Note:** The ETA shown during training estimates time to reach max training steps, not when early stop will fire. Actual time depends on loss convergence and will almost always be shorter than the ETA.
+
 ## Setup
 
 ```bash
