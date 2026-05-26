@@ -38,7 +38,7 @@ def wavlm_loss(wavlm, gen_wav, target_features, device, sr=44100):
 
 def load_ecapa(device):
     from speechbrain.inference.speaker import EncoderClassifier
-    model = EncoderClassifier.from_hdf5(
+    model = EncoderClassifier.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir="pipeline/pretrained/ecapa",
         run_opts={"device": str(device)},
