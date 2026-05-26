@@ -61,17 +61,17 @@ start.bat
 | Parameters | 66M | 99M |
 | Languages | 5 (en, ko, es, pt, fr) | 31 |
 | Vocoder steps default | 5 | 6 |
-| Recommended loss | WavLM | ECAPA-guided |
-| Recommended threshold | 0.24 | 0.15 |
+| Recommended loss | WavLM (recommended) | WavLM (recommended) |
+| Recommended threshold | 0.24 | 0.24 |
 
 ### Training Methods
 
-| Method | Loss function | Early stop criterion | Recommended for |
+| Method | Loss function | Early stop criterion | Status |
 |---|---|---|---|
-| **WavLM** | WavLM-Large Layer 3 mean+std MSE | WavLM loss <= threshold | v2 (calibrated) |
-| **ECAPA-guided** | WavLM backprop + ECAPA cosine similarity monitor | ECAPA 1-cosine <= threshold | v3 (recommended) |
+| **WavLM** | WavLM-Large Layer 3 mean+std MSE | WavLM loss <= threshold | **Recommended** for both v2 and v3 |
+| **ECAPA-guided** | WavLM backprop + ECAPA cosine similarity monitor | ECAPA 1-cosine <= threshold (WavLM 0.24 fallback) | **Experimental** -- needs more steps to reach desired speaker cosine similarity |
 
-WavLM always drives gradient backprop. ECAPA-guided mode adds ECAPA-TDNN speaker similarity as the stopping criterion instead of WavLM loss -- better for speaker identity matching.
+WavLM always drives gradient backprop. ECAPA-guided mode is experimental: it monitors ECAPA-TDNN speaker similarity as an additional stopping criterion, but typically needs significantly more training steps to reach the target cosine similarity threshold.
 
 ### Stop & Resume
 
